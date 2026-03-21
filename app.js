@@ -34,16 +34,16 @@ portalRouter.post('/login', async (req, res) => {
         
         if (role === 'student') {
             userResult = await pool.query(
-                `SELECT "studentId" as id, "firstName", "lastName", class, section, email, "dateOfBirth" 
+                `SELECT "studentId" as id, "firstName", "lastName", class, section, email, "dateOfBirth"::text as dob 
                  FROM students 
                  WHERE "studentId" = $1 AND "dateOfBirth"::text = $2`, 
                 [id, dob]
             );
         } else if (role === 'teacher') {
             userResult = await pool.query(
-                `SELECT "staffId" as id, "firstName", "lastName", role as userRole, department, email, "dateOfBirth" 
+                `SELECT "staffId" as id, "firstName", "lastName", email, dob::text as dob 
                  FROM staff 
-                 WHERE "staffId" = $1 AND "dateOfBirth"::text = $2`, 
+                 WHERE LOWER("staffId") = LOWER($1) AND dob::text = $2`, 
                 [id, dob]
             );
         } else {
@@ -51,6 +51,7 @@ portalRouter.post('/login', async (req, res) => {
         }
 
         const user = userResult.rows[0];
+        console.log(`[LOGIN DEBUG] Found user? ${user ? 'YES (' + user.id + ')' : 'NO (Check ID: ' + id + ', DOB: ' + dob + ')'}`);
 
         if (!user) {
             return res.status(401).json({ message: 'Invalid ID or Date of Birth' });
