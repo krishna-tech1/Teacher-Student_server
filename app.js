@@ -110,6 +110,53 @@ portalRouter.get('/profile', async (req, res) => {
     }
 });
 
+// Leave Application Logic
+portalRouter.post('/leaves', async (req, res) => {
+    try {
+        const { staffId, leaveType, startDate, endDate, reason } = req.body;
+        
+        // Validation
+        if (!staffId || !leaveType || !startDate || !endDate || !reason) {
+            return res.status(400).json({ message: 'All fields are mandatory.' });
+        }
+
+        // Check if startDate is in the past
+        const start = new Date(startDate);
+        const today = new Date();
+        today.setHours(0,0,0,0);
+        if (start < today) {
+            return res.status(400).json({ message: 'You cannot apply for leave on past dates.' });
+        }
+
+        // Limit reason to 75 characters
+        if (reason.length > 75) {
+            return res.status(400).json({ message: 'Description cannot exceed 75 characters.' });
+        }
+
+        const query = `
+            INSERT INTO staff_leaves ("staffId", "leaveType", "startDate", "endDate", "reason", "status")
+            VALUES ($1, $2, $3, $4, $5, 'Pending')
+            RETURNING *
+        `;
+        const result = await pool.query(query, [staffId, leaveType, startDate, endDate, reason]);
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error('Leave Application Error:', err);
+        res.status(500).json({ message: 'Error submitting leave application.' });
+    }
+});
+
+// Get Leave History for a Staff Member
+portalRouter.get('/leaves/:staffId', async (req, res) => {
+    try {
+        const { staffId } = req.params;
+        const result = await pool.query('SELECT * FROM staff_leaves WHERE "staffId" = $1 ORDER BY "appliedOn" DESC', [staffId]);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching leave history.' });
+    }
+});
+
 app.use('/api/portal', portalRouter);
 
 app.get('/', (req, res) => {
