@@ -157,6 +157,56 @@ portalRouter.get('/leaves/:staffId', async (req, res) => {
     }
 });
 
+// Get Timetable for a Staff Member
+portalRouter.get('/timetable/:staffId', async (req, res) => {
+    try {
+        const { staffId } = req.params;
+        const result = await pool.query('SELECT * FROM staff_timetables WHERE "staffId" = $1', [staffId]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Timetable Error:', err);
+        res.status(500).json({ message: 'Error fetching timetable.' });
+    }
+});
+
+// Save/Update Timetable for a specific day
+portalRouter.post('/timetable', async (req, res) => {
+    try {
+        const { staffId, day, periods } = req.body; 
+        // periods: { period1: { subject, class }, period2: ... }
+        
+        const query = `
+            INSERT INTO staff_timetables ("staffId", "day", "period1", "period2", "period3", "period4", "period5", "period6", "period7")
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT ("staffId", "day") DO UPDATE SET
+                "period1" = EXCLUDED."period1",
+                "period2" = EXCLUDED."period2",
+                "period3" = EXCLUDED."period3",
+                "period4" = EXCLUDED."period4",
+                "period5" = EXCLUDED."period5",
+                "period6" = EXCLUDED."period6",
+                "period7" = EXCLUDED."period7"
+            RETURNING *
+        `;
+        const values = [
+            staffId, 
+            day, 
+            periods.period1 || null, 
+            periods.period2 || null, 
+            periods.period3 || null, 
+            periods.period4 || null, 
+            periods.period5 || null, 
+            periods.period6 || null, 
+            periods.period7 || null
+        ];
+        const result = await pool.query(query, values);
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error('Save Timetable Error:', err);
+        res.status(500).json({ message: 'Error saving timetable.' });
+    }
+});
+
 app.use('/api/portal', portalRouter);
 
 app.get('/', (req, res) => {
