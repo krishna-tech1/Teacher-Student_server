@@ -570,7 +570,6 @@ portalRouter.get('/student-attendance/:studentId', async (req, res) => {
 portalRouter.get('/student-marks/:studentId', async (req, res) => {
     try {
         const { studentId } = req.params;
-
         const query = `
             SELECT 
                 m.subject,
@@ -584,12 +583,104 @@ portalRouter.get('/student-marks/:studentId', async (req, res) => {
             WHERE m."studentId" = $1
             ORDER BY m.subject ASC, m.exam_type ASC
         `;
-
         const result = await pool.query(query, [studentId]);
         res.json(result.rows);
     } catch (err) {
         console.error('Student Marks Fetch Error:', err);
         res.status(500).json({ message: 'Error fetching student marks.' });
+    }
+});
+
+// GET conversation between two specific users
+portalRouter.get('/messages/:userId/:otherId', async (req, res) => {
+    try {
+        const { userId, otherId } = req.params;
+        const result = await pool.query(
+            'SELECT * FROM portal_messages WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1) ORDER BY created_at ASC',
+            [userId, otherId]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Messages Error:', err);
+        res.status(500).json({ message: 'Error fetching messages.' });
+    }
+});
+
+// GET recent chat contacts for a user
+portalRouter.get('/messages/recent/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const result = await pool.query(`
+            SELECT DISTINCT ON (other_id) other_id, message, created_at, role, name
+            FROM (
+                SELECT 
+                    CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END as other_id,
+                    message, created_at
+                FROM portal_messages
+                WHERE sender_id = $1 OR receiver_id = $1
+                ORDER BY created_at DESC
+            ) m
+            LEFT JOIN (
+                SELECT "studentId" as sid, 'student' as role, "firstName" || ' ' || "lastName" as name FROM students
+                UNION ALL
+                SELECT "staffId" as sid, 'teacher' as role, "firstName" || ' ' || "lastName" as name FROM staff
+            ) u ON u.sid = m.other_id
+            ORDER BY other_id, created_at DESC
+        `, [userId]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Contacts Error:', err);
+        res.status(500).json({ message: 'Error fetching recent contacts.' });
+    }
+});
+
+// POST send a message
+portalRouter.post('/messages', async (req, res) => {
+    try {
+        const { sender_id, receiver_id, message } = req.body;
+        if (!sender_id || !receiver_id || !message) {
+            return res.status(400).json({ message: 'Missing fields.' });
+        }
+        const result = await pool.query(
+            'INSERT INTO portal_messages (sender_id, receiver_id, message) VALUES ($1, $2, $3) RETURNING *',
+            [sender_id, receiver_id, message]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error('Send Message Error:', err);
+        res.status(500).json({ message: 'Error sending message.' });
+    }
+});
+
+// GET students by name search (for messaging)
+portalRouter.get('/students/search', async (req, res) => {
+    try {
+        const { q } = req.query;
+        if (!q) return res.json([]);
+        const result = await pool.query(
+            "SELECT * FROM students WHERE \"firstName\" ILIKE $1 OR \"lastName\" ILIKE $1",
+            [`%${q}%`]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Student Search Error:', err);
+        res.status(500).json({ message: 'Error searching students.' });
+    }
+});
+
+// GET staff by name search (for messaging)
+portalRouter.get('/staff/search', async (req, res) => {
+    try {
+        const { q } = req.query;
+        if (!q) return res.json([]);
+        const result = await pool.query(
+            "SELECT * FROM staff WHERE \"firstName\" ILIKE $1 OR \"lastName\" ILIKE $1",
+            [`%${q}%`]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Staff Search Error:', err);
+        res.status(500).json({ message: 'Error searching staff.' });
     }
 });
 
