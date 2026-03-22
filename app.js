@@ -526,6 +526,73 @@ portalRouter.post('/marks', async (req, res) => {
     }
 });
 
+// GET Student Attendance for a specific month (student self-view)
+portalRouter.get('/student-attendance/:studentId', async (req, res) => {
+    try {
+        const { studentId } = req.params;
+        const { month, year } = req.query;
+
+        let query;
+        let values;
+
+        if (month && year) {
+            query = `
+                SELECT date::text, status, remarks
+                FROM student_attendance
+                WHERE "studentId" = $1
+                  AND EXTRACT(MONTH FROM date) = $2
+                  AND EXTRACT(YEAR FROM date) = $3
+                ORDER BY date ASC
+            `;
+            values = [studentId, parseInt(month), parseInt(year)];
+        } else {
+            // Default: current month
+            query = `
+                SELECT date::text, status, remarks
+                FROM student_attendance
+                WHERE "studentId" = $1
+                  AND EXTRACT(MONTH FROM date) = EXTRACT(MONTH FROM CURRENT_DATE)
+                  AND EXTRACT(YEAR FROM date) = EXTRACT(YEAR FROM CURRENT_DATE)
+                ORDER BY date ASC
+            `;
+            values = [studentId];
+        }
+
+        const result = await pool.query(query, values);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Student Attendance Fetch Error:', err);
+        res.status(500).json({ message: 'Error fetching student attendance.' });
+    }
+});
+
+// GET Student Marks with Teacher Name (student self-view)
+portalRouter.get('/student-marks/:studentId', async (req, res) => {
+    try {
+        const { studentId } = req.params;
+
+        const query = `
+            SELECT 
+                m.subject,
+                m.exam_type,
+                m.marks,
+                m.remarks,
+                m.created_at,
+                COALESCE(s."firstName" || ' ' || s."lastName", 'N/A') AS teacher_name
+            FROM student_marks m
+            LEFT JOIN staff s ON s."staffId" = m.submitted_by
+            WHERE m."studentId" = $1
+            ORDER BY m.subject ASC, m.exam_type ASC
+        `;
+
+        const result = await pool.query(query, [studentId]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Student Marks Fetch Error:', err);
+        res.status(500).json({ message: 'Error fetching student marks.' });
+    }
+});
+
 app.use('/api/portal', portalRouter);
 
 app.get('/', (req, res) => {
