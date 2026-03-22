@@ -368,6 +368,10 @@ portalRouter.post('/announcements', async (req, res) => {
             return res.status(400).json({ message: 'Missing required fields' });
         }
 
+        // Rule 1: Character limits (25 for subject, 75 for message)
+        if (title.length > 25) return res.status(400).json({ message: 'Subject exceeds 25 characters.' });
+        if (message.length > 75) return res.status(400).json({ message: 'Message exceeds 75 characters.' });
+
         await pool.query(`
             INSERT INTO announcements (sender_id, sender_name, sender_role, target_type, target_class, title, message, type)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -380,10 +384,20 @@ portalRouter.post('/announcements', async (req, res) => {
     }
 });
 
-// Delete Announcement
+// Delete Announcement (Rule 2: Delete option only to who posted)
 portalRouter.delete('/announcements/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        const { userId } = req.query; // Payer of the delete request
+
+        const result = await pool.query('SELECT sender_id FROM announcements WHERE id = $1', [id]);
+        if (result.rows.length === 0) return res.status(404).json({ message: 'Not found' });
+
+        // Admin (global) or the specific sender can delete
+        if (result.rows[0].sender_id !== userId && userId !== 'admin') {
+            return res.status(403).json({ message: 'Only the sender can delete this' });
+        }
+
         await pool.query('DELETE FROM announcements WHERE id = $1', [id]);
         res.json({ message: 'Announcement deleted successfully' });
     } catch (err) {
@@ -391,6 +405,21 @@ portalRouter.delete('/announcements/:id', async (req, res) => {
         res.status(500).json({ message: 'Error deleting announcement' });
     }
 });
+
+// Rule 3: Auto-delete after 5 days
+const cleanupAnnouncements = async () => {
+    try {
+        console.log('[CLEANUP] Removing announcements older than 5 days...');
+        await pool.query("DELETE FROM announcements WHERE created_at < NOW() - INTERVAL '5 days'");
+    } catch (err) {
+        console.error('Cleanup Error:', err);
+    }
+};
+
+// Run cleanup every hour
+setInterval(cleanupAnnouncements, 1000 * 60 * 60);
+// Run once on startup
+cleanupAnnouncements();
 
 portalRouter.post('/attendance', async (req, res) => {
     let client;
