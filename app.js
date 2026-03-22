@@ -31,19 +31,17 @@ portalRouter.post('/login', async (req, res) => {
         console.log(`[LOGIN ATTEMPT] Role: ${role}, ID: ${id}`);
 
         let userResult;
-        
+
         if (role === 'student') {
             userResult = await pool.query(
-                `SELECT "studentId" as id, "firstName", "lastName", class, section, email, "dateOfBirth"::text as dob 
-                 FROM students 
-                 WHERE "studentId" = $1 AND "dateOfBirth"::text = $2`, 
+                `SELECT * FROM students 
+                 WHERE "studentId" = $1 AND "dateOfBirth"::text = $2`,
                 [id, dob]
             );
         } else if (role === 'teacher') {
             userResult = await pool.query(
-                `SELECT "staffId" as id, "firstName", "lastName", email, dob::text as dob, class_teacher, "subjects_list" 
-                 FROM staff 
-                 WHERE LOWER("staffId") = LOWER($1) AND dob::text = $2`, 
+                `SELECT * FROM staff 
+                 WHERE LOWER("staffId") = LOWER($1) AND dob::text = $2`,
                 [id, dob]
             );
         } else {
@@ -67,15 +65,10 @@ portalRouter.post('/login', async (req, res) => {
         res.json({
             token,
             user: {
-                id: user.id,
+                ...user,
+                id: user.studentId || user.staffId || user.id,
                 name: `${user.firstName} ${user.lastName}`,
-                email: user.email,
-                role: role,
-                class: user.class,
-                section: user.section,
-                department: user.department,
-                class_teacher: user.class_teacher,
-                subjects: user.subjects_list ? JSON.parse(user.subjects_list) : []
+                role: role
             }
         });
     } catch (err) {
@@ -94,7 +87,7 @@ portalRouter.get('/profile', async (req, res) => {
 
         const token = authHeader.split(' ')[1];
         const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret_portal');
-        
+
         let result;
         if (decoded.role === 'student') {
             result = await pool.query('SELECT "studentId", "firstName", "lastName", class, section, email FROM students WHERE "studentId" = $1', [decoded.id]);
@@ -116,7 +109,7 @@ portalRouter.get('/profile', async (req, res) => {
 portalRouter.post('/leaves', async (req, res) => {
     try {
         const { staffId, leaveType, startDate, endDate, reason } = req.body;
-        
+
         // Validation
         if (!staffId || !leaveType || !startDate || !endDate || !reason) {
             return res.status(400).json({ message: 'All fields are mandatory.' });
@@ -125,7 +118,7 @@ portalRouter.post('/leaves', async (req, res) => {
         // Check if startDate is in the past
         const start = new Date(startDate);
         const today = new Date();
-        today.setHours(0,0,0,0);
+        today.setHours(0, 0, 0, 0);
         if (start < today) {
             return res.status(400).json({ message: 'You cannot apply for leave on past dates.' });
         }
@@ -174,9 +167,9 @@ portalRouter.get('/timetable/:staffId', async (req, res) => {
 // Save/Update Timetable for a specific day
 portalRouter.post('/timetable', async (req, res) => {
     try {
-        const { staffId, day, periods } = req.body; 
+        const { staffId, day, periods } = req.body;
         // periods: { period1: { subject, class }, period2: ... }
-        
+
         const query = `
             INSERT INTO staff_timetables ("staffId", "day", "period1", "period2", "period3", "period4", "period5", "period6", "period7")
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -191,14 +184,14 @@ portalRouter.post('/timetable', async (req, res) => {
             RETURNING *
         `;
         const values = [
-            staffId, 
-            day, 
-            periods.period1 || null, 
-            periods.period2 || null, 
-            periods.period3 || null, 
-            periods.period4 || null, 
-            periods.period5 || null, 
-            periods.period6 || null, 
+            staffId,
+            day,
+            periods.period1 || null,
+            periods.period2 || null,
+            periods.period3 || null,
+            periods.period4 || null,
+            periods.period5 || null,
+            periods.period6 || null,
             periods.period7 || null
         ];
         const result = await pool.query(query, values);
@@ -265,9 +258,9 @@ portalRouter.get('/class-counts', async (req, res) => {
     try {
         const { classes } = req.query; // Expecting comma separated or multiple
         if (!classes) return res.json({});
-        
+
         const classList = Array.isArray(classes) ? classes : classes.split(',');
-        
+
         const counts = {};
         for (const cls of classList) {
             const parts = cls.trim().split(' ');
@@ -328,9 +321,9 @@ portalRouter.get('/announcements', async (req, res) => {
         // Students see 'students'
         // If className is provided, see 'class' matching className
         // Users also see announcements they SENT
-        
+
         const conditions = ["target_type = 'all'"];
-        
+
         if (role === 'teacher') {
             conditions.push("target_type = 'teachers'");
         } else if (role === 'student') {
@@ -363,7 +356,7 @@ portalRouter.get('/announcements', async (req, res) => {
 portalRouter.post('/announcements', async (req, res) => {
     try {
         const { sender_id, sender_name, sender_role, target_type, target_class, title, message, type } = req.body;
-        
+
         if (!sender_id || !title || !message) {
             return res.status(400).json({ message: 'Missing required fields' });
         }
@@ -388,7 +381,7 @@ portalRouter.post('/announcements', async (req, res) => {
 portalRouter.delete('/announcements/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { userId, role } = req.query; 
+        const { userId, role } = req.query;
 
         const result = await pool.query('SELECT sender_id, sender_role FROM announcements WHERE id = $1', [id]);
         if (result.rows.length === 0) return res.status(404).json({ message: 'Not found' });
@@ -430,14 +423,14 @@ cleanupAnnouncements();
 portalRouter.post('/attendance', async (req, res) => {
     let client;
     try {
-        const { records } = req.body; 
+        const { records } = req.body;
         if (!records || !Array.isArray(records)) {
             return res.status(400).json({ message: 'Invalid attendance records.' });
         }
 
         client = await pool.connect();
         await client.query('BEGIN');
-        
+
         for (const record of records) {
             const { studentId, className, section, date, status, remarks, staffId } = record;
             const upsertQuery = `
@@ -448,7 +441,7 @@ portalRouter.post('/attendance', async (req, res) => {
             `;
             await client.query(upsertQuery, [studentId, className, section, date, status, remarks, staffId]);
         }
-        
+
         await client.query('COMMIT');
         res.json({ message: 'Attendance updated successfully.' });
     } catch (err) {
@@ -496,14 +489,14 @@ portalRouter.post('/settings', async (req, res) => {
 portalRouter.post('/marks', async (req, res) => {
     let client;
     try {
-        const { records } = req.body; 
+        const { records } = req.body;
         if (!records || !Array.isArray(records)) {
             return res.status(400).json({ message: 'Invalid marks records.' });
         }
 
         client = await pool.connect();
         await client.query('BEGIN');
-        
+
         for (const record of records) {
             const { studentId, className, section, subject, examType, marks, remarks, staffId } = record;
             const upsertQuery = `
@@ -514,7 +507,7 @@ portalRouter.post('/marks', async (req, res) => {
             `;
             await client.query(upsertQuery, [studentId, className, section, subject, examType, marks, remarks, staffId]);
         }
-        
+
         await client.query('COMMIT');
         res.json({ message: 'Marks updated successfully.' });
     } catch (err) {
@@ -591,10 +584,47 @@ portalRouter.get('/student-marks/:studentId', async (req, res) => {
     }
 });
 
+// GET recent chat contacts for a user with unread counts
+portalRouter.get('/messages/recent/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        console.log(`[MSG DEBUG] Fetching recent contacts for: ${userId}`);
+        const result = await pool.query(`
+            SELECT 
+                m.other_id, 
+                m.message, 
+                m.created_at, 
+                u.role, 
+                u.name,
+                (SELECT COUNT(*)::int FROM portal_messages 
+                 WHERE receiver_id = $1 AND sender_id = m.other_id AND is_read = false) as unread_count
+            FROM (
+                SELECT DISTINCT ON (other_id) 
+                    CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END as other_id,
+                    message, created_at
+                FROM portal_messages
+                WHERE sender_id = $1 OR receiver_id = $1
+                ORDER BY other_id, created_at DESC
+            ) m
+            LEFT JOIN (
+                SELECT "studentId" as sid, 'student' as role, "firstName" || ' ' || "lastName" as name FROM students
+                UNION ALL
+                SELECT "staffId" as sid, 'teacher' as role, "firstName" || ' ' || "lastName" as name FROM staff
+            ) u ON u.sid = m.other_id
+            ORDER BY m.created_at DESC
+        `, [userId]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Contacts Error:', err);
+        res.status(500).json({ message: 'Error fetching recent contacts.' });
+    }
+});
+
 // GET conversation between two specific users
 portalRouter.get('/messages/:userId/:otherId', async (req, res) => {
     try {
         const { userId, otherId } = req.params;
+        console.log(`[MSG DEBUG] Fetching messages: ${userId} <-> ${otherId}`);
         const result = await pool.query(
             'SELECT * FROM portal_messages WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1) ORDER BY created_at ASC',
             [userId, otherId]
@@ -606,38 +636,11 @@ portalRouter.get('/messages/:userId/:otherId', async (req, res) => {
     }
 });
 
-// GET recent chat contacts for a user
-portalRouter.get('/messages/recent/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const result = await pool.query(`
-            SELECT DISTINCT ON (other_id) other_id, message, created_at, role, name
-            FROM (
-                SELECT 
-                    CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END as other_id,
-                    message, created_at
-                FROM portal_messages
-                WHERE sender_id = $1 OR receiver_id = $1
-                ORDER BY created_at DESC
-            ) m
-            LEFT JOIN (
-                SELECT "studentId" as sid, 'student' as role, "firstName" || ' ' || "lastName" as name FROM students
-                UNION ALL
-                SELECT "staffId" as sid, 'teacher' as role, "firstName" || ' ' || "lastName" as name FROM staff
-            ) u ON u.sid = m.other_id
-            ORDER BY other_id, created_at DESC
-        `, [userId]);
-        res.json(result.rows);
-    } catch (err) {
-        console.error('Fetch Contacts Error:', err);
-        res.status(500).json({ message: 'Error fetching recent contacts.' });
-    }
-});
-
 // POST send a message
 portalRouter.post('/messages', async (req, res) => {
     try {
         const { sender_id, receiver_id, message } = req.body;
+        console.log(`[MSG DEBUG] Sending message: ${sender_id} -> ${receiver_id}`);
         if (!sender_id || !receiver_id || !message) {
             return res.status(400).json({ message: 'Missing fields.' });
         }
@@ -649,6 +652,35 @@ portalRouter.post('/messages', async (req, res) => {
     } catch (err) {
         console.error('Send Message Error:', err);
         res.status(500).json({ message: 'Error sending message.' });
+    }
+});
+
+// PATCH mark messages as read
+portalRouter.patch('/messages/read/:userId/:otherId', async (req, res) => {
+    try {
+        const { userId, otherId } = req.params;
+        console.log(`[MSG DEBUG] Marking as read: ${otherId} -> ${userId}`);
+        await pool.query(
+            'UPDATE portal_messages SET is_read = true WHERE receiver_id = $1 AND sender_id = $2 AND is_read = false',
+            [userId, otherId]
+        );
+        res.json({ message: 'Messages marked as read.' });
+    } catch (err) {
+        console.error('Read Receipt Error:', err);
+        res.status(500).json({ message: 'Error marking messages as read.' });
+    }
+});
+
+// DELETE a message (delete for everyone)
+portalRouter.delete('/messages/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        console.log(`[MSG DEBUG] Deleting message ID: ${id}`);
+        await pool.query('DELETE FROM portal_messages WHERE id = $1', [id]);
+        res.json({ message: 'Message deleted successfully.' });
+    } catch (err) {
+        console.error('Delete Message Error:', err);
+        res.status(500).json({ message: 'Error deleting message.' });
     }
 });
 
@@ -682,6 +714,12 @@ portalRouter.get('/staff/search', async (req, res) => {
         console.error('Staff Search Error:', err);
         res.status(500).json({ message: 'Error searching staff.' });
     }
+});
+
+// Catch-all for portal router (if no route matched)
+portalRouter.use((req, res) => {
+    console.log(`[PORTAL 404] No route found for: ${req.method} ${req.url}`);
+    res.status(404).json({ message: `Portal route not found: ${req.method} ${req.url}` });
 });
 
 app.use('/api/portal', portalRouter);
