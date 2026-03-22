@@ -261,6 +261,38 @@ portalRouter.get('/marks', async (req, res) => {
 });
 
 // Get Attendance for students in a class, section, date
+portalRouter.get('/class-counts', async (req, res) => {
+    try {
+        const { classes } = req.query; // Expecting comma separated or multiple
+        if (!classes) return res.json({});
+        
+        const classList = Array.isArray(classes) ? classes : classes.split(',');
+        
+        const counts = {};
+        for (const cls of classList) {
+            const parts = cls.trim().split(' ');
+            let className = '';
+            let section = '';
+            if (parts.length > 1) {
+                section = parts.pop();
+                className = parts.join(' ');
+            } else {
+                className = parts[0];
+            }
+
+            const result = await pool.query(
+                'SELECT COUNT(*) FROM students WHERE class = $1 AND section = $2',
+                [className, section]
+            );
+            counts[cls] = parseInt(result.rows[0].count);
+        }
+        res.json(counts);
+    } catch (err) {
+        console.error('Count Error:', err);
+        res.status(500).json({ message: 'Error fetching counts' });
+    }
+});
+
 portalRouter.get('/attendance', async (req, res) => {
     try {
         const { className, section, date } = req.query;
@@ -284,6 +316,82 @@ portalRouter.get('/attendance', async (req, res) => {
 });
 
 // Save Attendance (Upsert)
+// Fetch Relevant Announcements
+portalRouter.get('/announcements', async (req, res) => {
+    try {
+        const { role, class: className, userId } = req.query;
+        if (!role) return res.status(400).json({ message: 'Role is required' });
+
+        // Build filtering conditions
+        // Everyone sees 'all'
+        // Teachers see 'teachers'
+        // Students see 'students'
+        // If className is provided, see 'class' matching className
+        // Users also see announcements they SENT
+        
+        const conditions = ["target_type = 'all'"];
+        
+        if (role === 'teacher') {
+            conditions.push("target_type = 'teachers'");
+        } else if (role === 'student') {
+            conditions.push("target_type = 'students'");
+        }
+
+        if (className) {
+            conditions.push(`(target_type = 'class' AND target_class = '${className}')`);
+        }
+
+        if (userId) {
+            conditions.push(`sender_id = '${userId}'`);
+        }
+
+        const query = `
+            SELECT * FROM announcements 
+            WHERE ${conditions.join(' OR ')}
+            ORDER BY created_at DESC
+        `;
+
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Announcements Error:', err);
+        res.status(500).json({ message: 'Error fetching announcements' });
+    }
+});
+
+// Create Announcement
+portalRouter.post('/announcements', async (req, res) => {
+    try {
+        const { sender_id, sender_name, sender_role, target_type, target_class, title, message, type } = req.body;
+        
+        if (!sender_id || !title || !message) {
+            return res.status(400).json({ message: 'Missing required fields' });
+        }
+
+        await pool.query(`
+            INSERT INTO announcements (sender_id, sender_name, sender_role, target_type, target_class, title, message, type)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `, [sender_id, sender_name, sender_role, target_type, target_class, title, message, type || 'info']);
+
+        res.json({ message: 'Announcement posted successfully' });
+    } catch (err) {
+        console.error('Post Announcement Error:', err);
+        res.status(500).json({ message: 'Error posting announcement' });
+    }
+});
+
+// Delete Announcement
+portalRouter.delete('/announcements/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await pool.query('DELETE FROM announcements WHERE id = $1', [id]);
+        res.json({ message: 'Announcement deleted successfully' });
+    } catch (err) {
+        console.error('Delete Announcement Error:', err);
+        res.status(500).json({ message: 'Error deleting announcement' });
+    }
+});
+
 portalRouter.post('/attendance', async (req, res) => {
     let client;
     try {
@@ -320,7 +428,7 @@ portalRouter.post('/attendance', async (req, res) => {
 // GET System Settings
 portalRouter.get('/settings', async (req, res) => {
     try {
-        const result = await pool.query('SELECT key, value FROM system_settings');
+        const result = await pool.query('SELECT "key", value FROM system_settings');
         const settings = {};
         result.rows.forEach(r => settings[r.key] = r.value);
         res.json(settings);
@@ -337,9 +445,9 @@ portalRouter.post('/settings', async (req, res) => {
         if (!key) return res.status(400).json({ message: 'Setting key is required.' });
 
         await pool.query(`
-            INSERT INTO system_settings (key, value, updated_at)
+            INSERT INTO system_settings ("key", value, updated_at)
             VALUES ($1, $2, CURRENT_TIMESTAMP)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+            ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
         `, [key, value]);
 
         res.json({ message: `Setting ${key} updated successfully.` });
