@@ -388,13 +388,19 @@ portalRouter.post('/announcements', async (req, res) => {
 portalRouter.delete('/announcements/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { userId } = req.query; // Payer of the delete request
+        const { userId, role } = req.query; 
 
-        const result = await pool.query('SELECT sender_id FROM announcements WHERE id = $1', [id]);
+        const result = await pool.query('SELECT sender_id, sender_role FROM announcements WHERE id = $1', [id]);
         if (result.rows.length === 0) return res.status(404).json({ message: 'Not found' });
 
-        // Admin (global) or the specific sender can delete
-        if (result.rows[0].sender_id !== userId && userId !== 'admin') {
+        const ann = result.rows[0];
+
+        // 1. Admin can delete any 'admin' announcement
+        // 2. The original poster can delete their own
+        const isAuthor = (ann.sender_id === userId);
+        const isAdminOverAdmin = (role === 'admin' && ann.sender_role === 'admin');
+
+        if (!isAuthor && !isAdminOverAdmin) {
             return res.status(403).json({ message: 'Only the sender can delete this' });
         }
 
