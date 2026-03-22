@@ -41,7 +41,7 @@ portalRouter.post('/login', async (req, res) => {
             );
         } else if (role === 'teacher') {
             userResult = await pool.query(
-                `SELECT "staffId" as id, "firstName", "lastName", email, dob::text as dob 
+                `SELECT "staffId" as id, "firstName", "lastName", email, dob::text as dob, class_teacher, "subjects_list" 
                  FROM staff 
                  WHERE LOWER("staffId") = LOWER($1) AND dob::text = $2`, 
                 [id, dob]
@@ -73,7 +73,9 @@ portalRouter.post('/login', async (req, res) => {
                 role: role,
                 class: user.class,
                 section: user.section,
-                department: user.department
+                department: user.department,
+                class_teacher: user.class_teacher,
+                subjects: user.subjects_list ? JSON.parse(user.subjects_list) : []
             }
         });
     } catch (err) {
@@ -204,6 +206,180 @@ portalRouter.post('/timetable', async (req, res) => {
     } catch (err) {
         console.error('Save Timetable Error:', err);
         res.status(500).json({ message: 'Error saving timetable.' });
+    }
+});
+
+// Get Students for a specific class and section
+portalRouter.get('/students', async (req, res) => {
+    try {
+        const { className, section } = req.query;
+        if (!className) {
+            return res.status(400).json({ message: 'ClassName is required.' });
+        }
+
+        const query = `
+            SELECT "studentId", "firstName", "lastName", class, section, email, "dateOfBirth"::text as dob, photo_url
+            FROM students
+            WHERE class = $1 ${section ? 'AND section = $2' : ''}
+            ORDER BY "firstName" ASC
+        `;
+        const values = section ? [className, section] : [className];
+        const result = await pool.query(query, values);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Students Error:', err);
+        res.status(500).json({ message: 'Error fetching students.' });
+    }
+});
+
+// Get Marks for students in a class, section, subject
+portalRouter.get('/marks', async (req, res) => {
+    try {
+        const { className, section, subject } = req.query;
+        if (!className || !subject) {
+            return res.status(400).json({ message: 'ClassName and Subject are required.' });
+        }
+
+        const query = `
+            SELECT s."studentId", s."firstName", s."lastName", 
+                   m1.marks as u1_marks, m1.remarks as u1_remarks,
+                   m2.marks as u2_marks, m2.remarks as u2_remarks,
+                   m3.marks as u3_marks, m3.remarks as u3_remarks
+            FROM students s
+            LEFT JOIN student_marks m1 ON s."studentId" = m1."studentId" AND m1.subject = $3 AND m1.exam_type = 'U1'
+            LEFT JOIN student_marks m2 ON s."studentId" = m2."studentId" AND m2.subject = $3 AND m2.exam_type = 'U2'
+            LEFT JOIN student_marks m3 ON s."studentId" = m3."studentId" AND m3.subject = $3 AND m3.exam_type = 'U3'
+            WHERE s.class = $1 AND s.section = $2
+            ORDER BY s."firstName" ASC
+        `;
+        const result = await pool.query(query, [className, section, subject]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Marks Error:', err);
+        res.status(500).json({ message: 'Error fetching marks.' });
+    }
+});
+
+// Get Attendance for students in a class, section, date
+portalRouter.get('/attendance', async (req, res) => {
+    try {
+        const { className, section, date } = req.query;
+        if (!className || !date) {
+            return res.status(400).json({ message: 'ClassName and Date are required.' });
+        }
+
+        const query = `
+            SELECT s."studentId", s."firstName", s."lastName", a.status, a.remarks
+            FROM students s
+            LEFT JOIN student_attendance a ON s."studentId" = a."studentId" AND a.date = $3
+            WHERE s.class = $1 AND s.section = $2
+            ORDER BY s."firstName" ASC
+        `;
+        const result = await pool.query(query, [className, section, date]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Attendance Error:', err);
+        res.status(500).json({ message: 'Error fetching attendance.' });
+    }
+});
+
+// Save Attendance (Upsert)
+portalRouter.post('/attendance', async (req, res) => {
+    let client;
+    try {
+        const { records } = req.body; 
+        if (!records || !Array.isArray(records)) {
+            return res.status(400).json({ message: 'Invalid attendance records.' });
+        }
+
+        client = await pool.connect();
+        await client.query('BEGIN');
+        
+        for (const record of records) {
+            const { studentId, className, section, date, status, remarks, staffId } = record;
+            const upsertQuery = `
+                INSERT INTO student_attendance ("studentId", class, section, date, status, remarks, "submitted_by")
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT ("studentId", date)
+                DO UPDATE SET status = EXCLUDED.status, remarks = EXCLUDED.remarks, created_at = CURRENT_TIMESTAMP
+            `;
+            await client.query(upsertQuery, [studentId, className, section, date, status, remarks, staffId]);
+        }
+        
+        await client.query('COMMIT');
+        res.json({ message: 'Attendance updated successfully.' });
+    } catch (err) {
+        if (client) await client.query('ROLLBACK');
+        console.error('Save Attendance Error:', err);
+        res.status(500).json({ message: 'Error saving attendance.' });
+    } finally {
+        if (client) client.release();
+    }
+});
+
+// GET System Settings
+portalRouter.get('/settings', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT key, value FROM system_settings');
+        const settings = {};
+        result.rows.forEach(r => settings[r.key] = r.value);
+        res.json(settings);
+    } catch (err) {
+        console.error('Fetch Settings Error:', err);
+        res.status(500).json({ message: 'Error fetching settings.' });
+    }
+});
+
+// POST Update System Settings (Admin only action)
+portalRouter.post('/settings', async (req, res) => {
+    try {
+        const { key, value } = req.body;
+        if (!key) return res.status(400).json({ message: 'Setting key is required.' });
+
+        await pool.query(`
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES ($1, $2, CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+        `, [key, value]);
+
+        res.json({ message: `Setting ${key} updated successfully.` });
+    } catch (err) {
+        console.error('Update Setting Error:', err);
+        res.status(500).json({ message: 'Error updating setting.' });
+    }
+});
+
+// Save Marks (Upsert)
+portalRouter.post('/marks', async (req, res) => {
+    let client;
+    try {
+        const { records } = req.body; 
+        if (!records || !Array.isArray(records)) {
+            return res.status(400).json({ message: 'Invalid marks records.' });
+        }
+
+        client = await pool.connect();
+        await client.query('BEGIN');
+        
+        for (const record of records) {
+            const { studentId, className, section, subject, examType, marks, remarks } = record;
+            const upsertQuery = `
+                INSERT INTO student_marks ("studentId", class, section, subject, exam_type, marks, remarks)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT ("studentId", subject, exam_type)
+                DO UPDATE SET marks = EXCLUDED.marks, remarks = EXCLUDED.remarks, created_at = CURRENT_TIMESTAMP
+            `;
+            await client.query(upsertQuery, [studentId, className, section, subject, examType, marks, remarks]);
+        }
+        
+        await client.query('COMMIT');
+        res.json({ message: 'Marks updated successfully.' });
+    } catch (err) {
+        if (client) await client.query('ROLLBACK');
+        console.error('Save Marks Error:', err);
+        res.status(500).json({ message: 'Error saving marks.' });
+    } finally {
+        if (client) client.release();
     }
 });
 
