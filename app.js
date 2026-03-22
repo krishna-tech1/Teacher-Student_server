@@ -505,14 +505,14 @@ portalRouter.post('/marks', async (req, res) => {
         await client.query('BEGIN');
         
         for (const record of records) {
-            const { studentId, className, section, subject, examType, marks, remarks } = record;
+            const { studentId, className, section, subject, examType, marks, remarks, staffId } = record;
             const upsertQuery = `
-                INSERT INTO student_marks ("studentId", class, section, subject, exam_type, marks, remarks)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO student_marks ("studentId", class, section, subject, exam_type, marks, remarks, submitted_by)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT ("studentId", subject, exam_type)
-                DO UPDATE SET marks = EXCLUDED.marks, remarks = EXCLUDED.remarks, created_at = CURRENT_TIMESTAMP
+                DO UPDATE SET marks = EXCLUDED.marks, remarks = EXCLUDED.remarks, submitted_by = EXCLUDED.submitted_by, created_at = CURRENT_TIMESTAMP
             `;
-            await client.query(upsertQuery, [studentId, className, section, subject, examType, marks, remarks]);
+            await client.query(upsertQuery, [studentId, className, section, subject, examType, marks, remarks, staffId]);
         }
         
         await client.query('COMMIT');
