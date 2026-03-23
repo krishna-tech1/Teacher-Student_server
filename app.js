@@ -2,6 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
+const cloudinary = require('cloudinary').v2;
+const multer = require('multer');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 require('dotenv').config();
 
 const app = express();
@@ -14,6 +17,25 @@ const pool = new Pool({
         rejectUnauthorized: false
     }
 });
+
+// Cloudinary Configuration
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Set up Cloudinary storage for Multer
+const storage = new CloudinaryStorage({
+    cloudinary: cloudinary,
+    params: {
+        folder: 'school_documents',
+        resource_type: 'auto', // Support PDF, Doc, Images etc.
+        allowed_formats: ['jpg', 'png', 'pdf', 'docx', 'xlsx', 'txt']
+    }
+});
+
+const upload = multer({ storage: storage });
 
 app.use(cors());
 app.use(express.json());
@@ -716,6 +738,78 @@ portalRouter.get('/staff/search', async (req, res) => {
     } catch (err) {
         console.error('Staff Search Error:', err);
         res.status(500).json({ message: 'Error searching staff.' });
+    }
+});
+// GET documents for a user
+portalRouter.get('/documents/:role/:userId', async (req, res) => {
+    try {
+        const { role, userId } = req.params;
+        const result = await pool.query(
+            'SELECT * FROM user_documents WHERE user_id = $1 AND role = $2 ORDER BY uploaded_at DESC',
+            [userId, role]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Documents Error:', err);
+        res.status(500).json({ message: 'Error fetching documents.' });
+    }
+});
+
+// POST upload a document
+portalRouter.post('/documents/upload', upload.single('file'), async (req, res) => {
+    try {
+        const { userId, role, filename } = req.body;
+        
+        if (!req.file || !userId || !role) {
+            return res.status(400).json({ message: 'Missing file or user information.' });
+        }
+
+        const query = `
+            INSERT INTO user_documents (user_id, role, filename, file_url, cloudinary_id, size)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+        `;
+        const result = await pool.query(query, [
+            userId,
+            role,
+            filename || req.file.originalname,
+            req.file.path, // This is the Cloudinary URL
+            req.file.filename, // This is the public_id in Cloudinary
+            req.file.size
+        ]);
+
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error('Upload Error:', err);
+        res.status(500).json({ message: 'Error uploading file.' });
+    }
+});
+
+// DELETE a document
+portalRouter.delete('/documents/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { userId, role } = req.query; // Security: verify ownership
+
+        // 1. Check ownership
+        const docResult = await pool.query('SELECT * FROM user_documents WHERE id = $1', [id]);
+        if (docResult.rows.length === 0) return res.status(404).json({ message: 'Document not found.' });
+        
+        const doc = docResult.rows[0];
+        if (doc.user_id !== userId || doc.role !== role) {
+            return res.status(403).json({ message: 'Permission denied. Only owner can delete.' });
+        }
+
+        // 2. Delete from Cloudinary
+        await cloudinary.uploader.destroy(doc.cloudinary_id);
+
+        // 3. Delete from Database
+        await pool.query('DELETE FROM user_documents WHERE id = $1', [id]);
+
+        res.json({ message: 'Document deleted successfully.' });
+    } catch (err) {
+        console.error('Delete Document Error:', err);
+        res.status(500).json({ message: 'Error deleting document.' });
     }
 });
 
