@@ -201,6 +201,27 @@ portalRouter.get('/timetable/student/:className/:section', async (req, res) => {
     }
 });
 
+// Notifications API
+portalRouter.get('/notifications/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const result = await pool.query('SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching notifications' });
+    }
+});
+
+portalRouter.patch('/notifications/read/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await pool.query('UPDATE notifications SET is_read = true WHERE id = $1', [id]);
+        res.json({ message: 'Notification marked as read' });
+    } catch (err) {
+        res.status(500).json({ message: 'Error updating notification' });
+    }
+});
+
 // Get Students for a specific class and section
 portalRouter.get('/students', async (req, res) => {
     try {
