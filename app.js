@@ -189,6 +189,61 @@ portalRouter.get('/timetable/:staffId', async (req, res) => {
     }
 });
 
+portalRouter.get('/teacher-dashboard-data/:staffId', async (req, res) => {
+    try {
+        const { staffId } = req.params;
+        const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const todayName = days[new Date().getDay()];
+
+        const timetableRes = await pool.query(
+            'SELECT * FROM staff_timetables WHERE "staffId" = $1 AND day = $2',
+            [staffId, todayName]
+        );
+
+        const periodTimings = {
+            period1: '09:00 AM',
+            period2: '10:00 AM',
+            period3: '11:15 AM',
+            period4: '12:15 PM',
+            period5: '02:00 PM',
+            period6: '03:00 PM',
+            period7: '04:00 PM'
+        };
+
+        let schedule = [];
+        let classesToday = 0;
+
+        if (timetableRes.rows.length > 0) {
+            const row = timetableRes.rows[0];
+            for (let i = 1; i <= 7; i++) {
+                const key = `period${i}`;
+                if (row[key]) {
+                    classesToday++;
+                    // Typical value format: "Maths (10-A)" or "Physics (12-B)"
+                    const parts = row[key].split('(');
+                    const subject = parts[0].trim();
+                    const className = parts[1] ? parts[1].replace(')', '').trim() : 'N/A';
+
+                    schedule.push({
+                        time: periodTimings[key],
+                        period: i,
+                        subject: subject,
+                        class: className
+                    });
+                }
+            }
+        }
+
+        res.json({
+            classesToday: classesToday > 0 ? classesToday.toString() : 'Not Allocated',
+            schedule: schedule
+        });
+    } catch (err) {
+        console.error('Teacher dash data error:', err);
+        res.status(500).json({ message: 'Error fetching teacher dashboard data' });
+    }
+});
+
 // Get Student Timetable
 portalRouter.get('/timetable/student/:className/:section', async (req, res) => {
     try {
@@ -444,15 +499,27 @@ portalRouter.post('/attendance', async (req, res) => {
     let client;
     try {
         const { records } = req.body;
-        if (!records || !Array.isArray(records)) {
-            return res.status(400).json({ message: 'Invalid attendance records.' });
+        if (!records || !Array.isArray(records) || records.length === 0) {
+            return res.status(200).json({ message: 'No records provided. Day remains unmarked (Holiday).' });
         }
+
+        const sample = records[0];
+        const { className, section, date, staffId } = sample;
 
         client = await pool.connect();
         await client.query('BEGIN');
 
+        // 1. Get all students for this class/section
+        const classStudentsRes = await client.query(
+            'SELECT "studentId" FROM students WHERE class = $1 AND section = $2',
+            [className, section]
+        );
+        const classStudentIds = classStudentsRes.rows.map(r => r.studentId);
+        const submittedStudentIds = records.map(r => r.studentId);
+
+        // 2. Upsert submitted records
         for (const record of records) {
-            const { studentId, className, section, date, status, remarks, staffId } = record;
+            const { studentId, status, remarks } = record;
             const upsertQuery = `
                 INSERT INTO student_attendance ("studentId", class, section, date, status, remarks, "submitted_by")
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -462,8 +529,20 @@ portalRouter.post('/attendance', async (req, res) => {
             await client.query(upsertQuery, [studentId, className, section, date, status, remarks, staffId]);
         }
 
+        // 3. Mark missing students as 'Absent' (Bulk Absent Logic)
+        const missingStudentIds = classStudentIds.filter(id => !submittedStudentIds.includes(id));
+        for (const studentId of missingStudentIds) {
+            const absentQuery = `
+                INSERT INTO student_attendance ("studentId", class, section, date, status, "submitted_by")
+                VALUES ($1, $2, $3, $4, 'Absent', $5)
+                ON CONFLICT ("studentId", date)
+                DO UPDATE SET status = EXCLUDED.status, created_at = CURRENT_TIMESTAMP
+            `;
+            await client.query(absentQuery, [studentId, className, section, date, staffId]);
+        }
+
         await client.query('COMMIT');
-        res.json({ message: 'Attendance updated successfully.' });
+        res.json({ message: 'Attendance updated successfully. Missing students marked as Absent.' });
     } catch (err) {
         if (client) await client.query('ROLLBACK');
         console.error('Save Attendance Error:', err);
