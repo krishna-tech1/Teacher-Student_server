@@ -195,10 +195,10 @@ portalRouter.get('/teacher-dashboard-data/:staffId', async (req, res) => {
         const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const todayName = days[new Date().getDay()];
 
-        const timetableRes = await pool.query(
-            'SELECT * FROM staff_timetables WHERE "staffId" = $1 AND day = $2',
-            [staffId, todayName]
-        );
+        const [timetableRes, staffRes] = await Promise.all([
+            pool.query('SELECT * FROM staff_timetables WHERE "staffId" = $1 AND day = $2', [staffId, todayName]),
+            pool.query('SELECT class_teacher, subjects FROM staff WHERE "staffId" = $1', [staffId])
+        ]);
 
         const periodTimings = {
             period1: '09:00 AM',
@@ -234,9 +234,47 @@ portalRouter.get('/teacher-dashboard-data/:staffId', async (req, res) => {
             }
         }
 
+        // Total Students logic
+        let totalStudents = 0;
+        const uniqueClasses = new Set();
+        if (staffRes.rows.length > 0) {
+            const staff = staffRes.rows[0];
+            
+            // Add if class teacher (format "LKG A")
+            if (staff.class_teacher) {
+                uniqueClasses.add(staff.class_teacher.trim());
+            }
+
+            // Parse subject teacher classes
+            if (staff.subjects) {
+                try {
+                    const subs = JSON.parse(staff.subjects);
+                    if (Array.isArray(subs)) {
+                        subs.forEach(s => {
+                            if (s.class && s.section) uniqueClasses.add(`${s.class} ${s.section}`.trim());
+                        });
+                    }
+                } catch (e) {
+                    console.log('Error parsing staff subjects JSON');
+                }
+            }
+
+            // Count students in unique classes
+            if (uniqueClasses.size > 0) {
+                for (const cls of uniqueClasses) {
+                    const parts = cls.split(' ');
+                    const section = parts.pop();
+                    const className = parts.join(' ');
+                    const countRes = await pool.query('SELECT COUNT(*) FROM students WHERE class = $1 AND section = $2', [className, section]);
+                    totalStudents += parseInt(countRes.rows[0].count);
+                }
+            }
+        }
+
         res.json({
             classesToday: classesToday > 0 ? classesToday.toString() : 'Not Allocated',
-            schedule: schedule
+            schedule: schedule,
+            totalStudents: totalStudents.toString()
         });
     } catch (err) {
         console.error('Teacher dash data error:', err);
@@ -655,6 +693,42 @@ portalRouter.get('/student-attendance/:studentId', async (req, res) => {
     } catch (err) {
         console.error('Student Attendance Fetch Error:', err);
         res.status(500).json({ message: 'Error fetching student attendance.' });
+    }
+});
+
+portalRouter.get('/student-fees/:studentId', async (req, res) => {
+    try {
+        const { studentId } = req.params;
+        const studentRes = await pool.query('SELECT class, "pendingFee" FROM students WHERE "studentId" = $1', [studentId]);
+        
+        if (studentRes.rows.length === 0) {
+            return res.status(404).json({ message: 'Student not found' });
+        }
+
+        const student = studentRes.rows[0];
+        const feesRes = await pool.query('SELECT * FROM class_fees WHERE class_name = $1', [student.class]);
+        const feesData = feesRes.rows;
+
+        const totalAnnual = feesData.reduce((sum, f) => sum + parseFloat(f.amount || 0), 0);
+        const pending = parseFloat(student.pendingFee || 0);
+        const paid = Math.max(0, totalAnnual - pending);
+
+        res.json({
+            stats: {
+                annual: `₹${totalAnnual.toLocaleString()}`,
+                paid: `₹${paid.toLocaleString()}`,
+                pending: `₹${pending.toLocaleString()}`
+            },
+            breakdown: feesData.map(f => ({
+                name: f.fee_name,
+                period: f.due_date ? `Due: ${new Date(f.due_date).toLocaleDateString()}` : 'Annual',
+                amount: `₹${parseFloat(f.amount).toLocaleString()}`
+            })),
+            totalAnnualStr: `₹${totalAnnual.toLocaleString()}`
+        });
+    } catch (err) {
+        console.error('Fetch student fees error:', err);
+        res.status(500).json({ message: 'Error fetching fee data' });
     }
 });
 
