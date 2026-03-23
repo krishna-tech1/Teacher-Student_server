@@ -234,40 +234,41 @@ portalRouter.get('/teacher-dashboard-data/:staffId', async (req, res) => {
             }
         }
 
-        // Total Students logic
+        // Total Students logic - Expanded to check BOTH staff profile AND dynamic timetable
         let totalStudents = 0;
         const uniqueClasses = new Set();
+        
+        // 1. Check Staff Profile (Class Teacher role)
         if (staffRes.rows.length > 0) {
             const staff = staffRes.rows[0];
-            
-            // Add if class teacher (format "LKG A")
-            if (staff.class_teacher) {
-                uniqueClasses.add(staff.class_teacher.trim());
-            }
+            if (staff.class_teacher) uniqueClasses.add(staff.class_teacher.trim());
+        }
 
-            // Parse subject teacher classes
-            if (staff.subjects) {
-                try {
-                    const subs = JSON.parse(staff.subjects);
-                    if (Array.isArray(subs)) {
-                        subs.forEach(s => {
-                            if (s.class && s.section) uniqueClasses.add(`${s.class} ${s.section}`.trim());
-                        });
+        // 2. Scan ALL WEEKLY TIMETABLE assignments (Subject Teacher roles)
+        const weeklyTimetableRes = await pool.query('SELECT * FROM staff_timetables WHERE "staffId" = $1', [staffId]);
+        weeklyTimetableRes.rows.forEach(dayRow => {
+            for (let i = 1; i <= 7; i++) {
+                const val = dayRow[`period${i}`];
+                if (val && typeof val === 'string') {
+                    // Extract class from format "Subject (Class-Section)" or "Subject (Class Section)"
+                    const match = val.match(/\(([^)]+)\)/);
+                    if (match) {
+                        const classSection = match[1].replace('-', ' ').trim();
+                        uniqueClasses.add(classSection);
                     }
-                } catch (e) {
-                    console.log('Error parsing staff subjects JSON');
                 }
             }
+        });
 
-            // Count students in unique classes
-            if (uniqueClasses.size > 0) {
-                for (const cls of uniqueClasses) {
-                    const parts = cls.split(' ');
-                    const section = parts.pop();
-                    const className = parts.join(' ');
-                    const countRes = await pool.query('SELECT COUNT(*) FROM students WHERE class = $1 AND section = $2', [className, section]);
-                    totalStudents += parseInt(countRes.rows[0].count);
-                }
+        // 3. Count students in the resulting deduplicated list
+        if (uniqueClasses.size > 0) {
+            for (const cls of uniqueClasses) {
+                const parts = cls.split(' ');
+                if (parts.length < 2) continue; // Skip invalid entries
+                const section = parts.pop();
+                const className = parts.join(' ');
+                const countRes = await pool.query('SELECT COUNT(*) FROM students WHERE class = $1 AND section = $2', [className, section]);
+                totalStudents += parseInt(countRes.rows[0].count);
             }
         }
 
