@@ -343,6 +343,8 @@ portalRouter.get('/students', async (req, res) => {
 portalRouter.get('/marks', async (req, res) => {
     try {
         const { className, section, subject } = req.query;
+        console.log(`[MARKS FETCH] Class: ${className}, Section: ${section}, Subject: ${subject}`);
+        
         if (!className || !subject) {
             return res.status(400).json({ message: 'ClassName and Subject are required.' });
         }
@@ -356,10 +358,11 @@ portalRouter.get('/marks', async (req, res) => {
             LEFT JOIN student_marks m1 ON s."studentId" = m1."studentId" AND m1.subject = $3 AND m1.exam_type = 'U1'
             LEFT JOIN student_marks m2 ON s."studentId" = m2."studentId" AND m2.subject = $3 AND m2.exam_type = 'U2'
             LEFT JOIN student_marks m3 ON s."studentId" = m3."studentId" AND m3.subject = $3 AND m3.exam_type = 'U3'
-            WHERE s.class = $1 AND s.section = $2
+            WHERE s.class = $1 ${section ? 'AND s.section = $2' : ''}
             ORDER BY s."firstName" ASC
         `;
-        const result = await pool.query(query, [className, section, subject]);
+        const values = section ? [className, section, subject] : [className, '', subject];
+        const result = await pool.query(query, values.filter(v => v !== undefined));
         res.json(result.rows);
     } catch (err) {
         console.error('Fetch Marks Error:', err);
