@@ -35,7 +35,10 @@ const storage = new CloudinaryStorage({
     }
 });
 
-const upload = multer({ storage: storage });
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB Upload Limit
+});
 
 app.use(cors());
 app.use(express.json());
@@ -60,7 +63,7 @@ const initDB = async () => {
                 description TEXT,
                 attachments TEXT,
                 due_date DATE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
             
             CREATE TABLE IF NOT EXISTS notifications (
@@ -69,7 +72,7 @@ const initDB = async () => {
                 title VARCHAR(100) NOT NULL,
                 message TEXT NOT NULL,
                 is_read BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS announcements (
@@ -82,7 +85,7 @@ const initDB = async () => {
                 title VARCHAR(100) NOT NULL,
                 message TEXT NOT NULL,
                 type VARCHAR(20) DEFAULT 'info',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS student_attendance (
@@ -94,7 +97,7 @@ const initDB = async () => {
                 status VARCHAR(20) NOT NULL,
                 remarks TEXT,
                 "submitted_by" VARCHAR(50),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE ("studentId", date)
             );
 
@@ -108,7 +111,7 @@ const initDB = async () => {
                 marks VARCHAR(10),
                 remarks TEXT,
                 submitted_by VARCHAR(50),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE ("studentId", subject, exam_type)
             );
 
@@ -120,33 +123,36 @@ const initDB = async () => {
                 submission_url TEXT,
                 grade VARCHAR(20),
                 feedback TEXT,
-                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                submitted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (homework_id, "studentId")
             );
+            
+            -- Set up indices for performance (Fix #3)
+            CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+            CREATE INDEX IF NOT EXISTS idx_subs_homework_id ON homework_submissions(homework_id);
+            CREATE INDEX IF NOT EXISTS idx_subs_student_id ON homework_submissions("studentId");
         `);
-        console.log('✅ Database tables verified');
+        console.log('✅ Database tables and indices verified');
+
+        // Automatic Maintenance: Delete old notifications (Fix #3)
+        await pool.query("DELETE FROM notifications WHERE created_at < NOW() - INTERVAL '30 days'");
+        console.log('🧹 Cleaned up notifications older than 30 days');
+
     } catch (err) {
         console.error('❌ DB Init Error:', err);
     }
 };
 initDB();
 
+// Global Timezone Enforcement (Fix #6 - IST)
+pool.on('connect', (client) => {
+    client.query('SET timezone = "Asia/Kolkata"');
+});
+
 // Portal Router
 const portalRouter = express.Router();
 
-// Debug DB Path
-portalRouter.get('/debug-db', async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public'
-        `);
-        res.json({ tables: result.rows.map(r => r.table_name) });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
+// [MOVED OR REMOVED FOR SECURITY] Debug DB Path removed for production.
 
 // Login Logic
 portalRouter.post('/login', async (req, res) => {
@@ -180,9 +186,15 @@ portalRouter.post('/login', async (req, res) => {
         }
 
         // Generate Token
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) {
+            console.error('CRITICAL: JWT_SECRET environment variable is missing!');
+            return res.status(500).json({ message: 'Security misconfiguration: Missing Secret.' });
+        }
+
         const token = jwt.sign(
             { id: user.id, role: role, name: `${user.firstName} ${user.lastName}` },
-            process.env.JWT_SECRET || 'secret_portal',
+            jwtSecret,
             { expiresIn: '7d' }
         );
 
@@ -209,8 +221,11 @@ portalRouter.get('/profile', async (req, res) => {
             return res.status(401).json({ message: 'No token provided' });
         }
 
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) throw new Error('JWT_SECRET missing');
+
         const token = authHeader.split(' ')[1];
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret_portal');
+        const decoded = jwt.verify(token, jwtSecret);
 
         let result;
         if (decoded.role === 'student') {
@@ -790,6 +805,27 @@ portalRouter.post('/homework', (req, res, next) => {
         ]);
 
         res.status(201).json(result.rows[0]);
+
+        // Background: Send Notifications to Students
+        try {
+            const hw = result.rows[0];
+            // Find all students in this class/section
+            const studentQuery = `
+                SELECT "studentId" FROM students 
+                WHERE LOWER(class) = LOWER($1) AND (LOWER(section) = LOWER($2) OR $2 = '')
+                   OR LOWER(class || ' ' || section) = LOWER($1 || ' ' || $2)
+            `;
+            const students = await pool.query(studentQuery, [className, section]);
+            
+            for (const s of students.rows) {
+                await pool.query(
+                    'INSERT INTO notifications (user_id, title, message) VALUES ($1, $2, $3)',
+                    [s.studentId, 'New Homework: ' + title, `A new assignment for ${subject} has been posted. Due: ${dueDate}`]
+                );
+            }
+        } catch (notifErr) {
+            console.error('Notification Error:', notifErr);
+        }
     } catch (err) {
         console.error('Create Homework FULL ERROR:', err);
         res.status(500).json({ 
@@ -800,17 +836,49 @@ portalRouter.post('/homework', (req, res, next) => {
     }
 });
 
+// Helper: Extract Cloudinary Public ID from URL
+const extractPublicId = (url) => {
+    try {
+        if (!url || typeof url !== 'string') return null;
+        const parts = url.split('/');
+        const uploadIndex = parts.indexOf('upload');
+        if (uploadIndex === -1) return null;
+        // Public ID is everything after the version (e.g. /upload/v1234/[folder/file.pdf])
+        const publicIdWithExt = parts.slice(uploadIndex + 2).join('/');
+        return publicIdWithExt.split('.')[0]; // remove file extension
+    } catch (e) { return null; }
+};
+
 portalRouter.delete('/homework/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const { teacherId } = req.query;
 
-        const result = await pool.query('DELETE FROM homework WHERE id = $1 AND teacher_id = $2 RETURNING *', [id, teacherId]);
-        
-        if (result.rows.length === 0) {
+        // 1. Fetch the homework first to get attachment URLs
+        const findRes = await pool.query('SELECT attachments FROM homework WHERE id = $1 AND teacher_id = $2', [id, teacherId]);
+        if (findRes.rows.length === 0) {
             return res.status(404).json({ message: 'Homework not found or unauthorized.' });
         }
-        res.json({ message: 'Homework deleted successfully.' });
+
+        const attachments = findRes.rows[0].attachments;
+
+        // 2. Delete database record
+        await pool.query('DELETE FROM homework WHERE id = $1', [id]);
+
+        // 3. Background: Cleanup Cloudinary Files
+        if (attachments) {
+            const urls = attachments.split(',');
+            for (const url of urls) {
+                const publicId = extractPublicId(url);
+                if (publicId) {
+                    cloudinary.uploader.destroy(publicId, { resource_type: 'auto' }).catch(err => {
+                        console.error('Cloudinary Cleanup Warning:', err);
+                    });
+                }
+            }
+        }
+
+        res.json({ message: 'Homework and attachments deleted successfully.' });
     } catch (err) {
         console.error('Delete Homework Error:', err);
         res.status(500).json({ message: 'Error deleting homework.' });
@@ -824,6 +892,20 @@ portalRouter.post('/homework/submit', upload.single('file'), async (req, res) =>
     try {
         const { homeworkId, studentId, studentName } = req.body;
         if (!req.file) return res.status(400).json({ message: 'No submission file (PDF) provided.' });
+
+        // 1. Cleanup old file if it exists (before updating)
+        try {
+            const oldSubRes = await pool.query('SELECT submission_url FROM homework_submissions WHERE homework_id = $1 AND "studentId" = $2', [homeworkId, studentId]);
+            if (oldSubRes.rows.length > 0) {
+                const oldUrl = oldSubRes.rows[0].submission_url;
+                const publicId = extractPublicId(oldUrl);
+                if (publicId) {
+                    cloudinary.uploader.destroy(publicId, { resource_type: 'auto' }).catch(err => console.error('Cloudinary Old Sub Cleanup Error:', err));
+                }
+            }
+        } catch (cleanupErr) {
+            console.error('Submission Cleanup Error (Skipped):', cleanupErr);
+        }
 
         const query = `
             INSERT INTO homework_submissions (homework_id, "studentId", student_name, submission_url)
@@ -864,7 +946,18 @@ portalRouter.patch('/homework/grade/:submissionId', async (req, res) => {
             'UPDATE homework_submissions SET grade = $1, feedback = $2 WHERE id = $3 RETURNING *',
             [grade, feedback, submissionId]
         );
-        res.json(result.rows[0]);
+        const entry = result.rows[0];
+        res.json(entry);
+
+        // Background: Send Notification to Student
+        try {
+            await pool.query(
+                'INSERT INTO notifications (user_id, title, message) VALUES ($1, $2, $3)',
+                [entry.studentId, 'Homework Graded', `Your submission for homework #${entry.homework_id} has been graded. Grade: ${grade}`]
+            );
+        } catch (notifErr) {
+            console.error('Grading Notification Error:', notifErr);
+        }
     } catch (err) {
         res.status(500).json({ message: 'Error saving grade.' });
     }
