@@ -46,8 +46,107 @@ app.use((req, res, next) => {
     next();
 });
 
+// Database Initialization
+const initDB = async () => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS homework (
+                id SERIAL PRIMARY KEY,
+                teacher_id VARCHAR(50) NOT NULL,
+                class_name VARCHAR(50) NOT NULL,
+                section VARCHAR(10) NOT NULL,
+                subject VARCHAR(100) NOT NULL,
+                title VARCHAR(200) NOT NULL,
+                description TEXT,
+                attachments TEXT,
+                due_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE TABLE IF NOT EXISTS notifications (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(50) NOT NULL,
+                title VARCHAR(100) NOT NULL,
+                message TEXT NOT NULL,
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS announcements (
+                id SERIAL PRIMARY KEY,
+                sender_id VARCHAR(50) NOT NULL,
+                sender_name VARCHAR(100) NOT NULL,
+                sender_role VARCHAR(20) NOT NULL,
+                target_type VARCHAR(20) NOT NULL,
+                target_class VARCHAR(50),
+                title VARCHAR(100) NOT NULL,
+                message TEXT NOT NULL,
+                type VARCHAR(20) DEFAULT 'info',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS student_attendance (
+                id SERIAL PRIMARY KEY,
+                "studentId" VARCHAR(50) NOT NULL,
+                class VARCHAR(50) NOT NULL,
+                section VARCHAR(10) NOT NULL,
+                date DATE NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                remarks TEXT,
+                "submitted_by" VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE ("studentId", date)
+            );
+
+            CREATE TABLE IF NOT EXISTS student_marks (
+                id SERIAL PRIMARY KEY,
+                "studentId" VARCHAR(50) NOT NULL,
+                class VARCHAR(50) NOT NULL,
+                section VARCHAR(10) NOT NULL,
+                subject VARCHAR(100) NOT NULL,
+                exam_type VARCHAR(20) NOT NULL,
+                marks VARCHAR(10),
+                remarks TEXT,
+                submitted_by VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE ("studentId", subject, exam_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS homework_submissions (
+                id SERIAL PRIMARY KEY,
+                homework_id INT NOT NULL,
+                "studentId" VARCHAR(50) NOT NULL,
+                student_name VARCHAR(100),
+                submission_url TEXT,
+                grade VARCHAR(20),
+                feedback TEXT,
+                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (homework_id, "studentId")
+            );
+        `);
+        console.log('✅ Database tables verified');
+    } catch (err) {
+        console.error('❌ DB Init Error:', err);
+    }
+};
+initDB();
+
 // Portal Router
 const portalRouter = express.Router();
+
+// Debug DB Path
+portalRouter.get('/debug-db', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+        `);
+        res.json({ tables: result.rows.map(r => r.table_name) });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // Login Logic
 portalRouter.post('/login', async (req, res) => {
@@ -299,10 +398,11 @@ portalRouter.get('/timetable/student/:className/:section', async (req, res) => {
 portalRouter.get('/notifications/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
-        const result = await pool.query('SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+        const result = await pool.query('SELECT * FROM notifications WHERE user_id = $1', [userId]);
         res.json(result.rows);
     } catch (err) {
-        res.status(500).json({ message: 'Error fetching notifications' });
+        console.error('[NOTIFICATIONS ERROR]', err);
+        res.status(500).json({ message: 'Error fetching notifications', details: err.message });
     }
 });
 
@@ -625,6 +725,203 @@ portalRouter.post('/settings', async (req, res) => {
         res.status(500).json({ message: 'Error updating setting.' });
     }
 });
+
+// Homework Logic
+portalRouter.get('/homework', async (req, res) => {
+    try {
+        const { teacherId, className, section } = req.query;
+        let query = 'SELECT * FROM homework ';
+        let params = [];
+
+        if (teacherId) {
+            query += 'WHERE teacher_id = $1 ';
+            params.push(teacherId);
+        } else if (className) {
+            query += 'WHERE class_name = $1 AND section = $2 ';
+            params.push(className, section || '');
+        }
+
+        query += 'ORDER BY created_at DESC';
+        const result = await pool.query(query, params);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Fetch Homework Error:', err);
+        res.status(500).json({ message: 'Error fetching homework.' });
+    }
+});
+
+portalRouter.post('/homework', (req, res, next) => {
+    console.log('[DEBUG] Starting homework post upload');
+    upload.array('files', 5)(req, res, (err) => {
+        if (err) {
+            console.error('[DEBUG] Multer Upload Error:', err);
+            return res.status(500).json({ 
+                message: 'File upload error reaching Cloudinary.',
+                error: err.message,
+                details: 'This often happens if Cloudinary credentials in .env are invalid or network is blocked.' 
+            });
+        }
+        next();
+    });
+}, async (req, res) => {
+    try {
+        const { teacherId, className, section, subject, title, description, dueDate } = req.body;
+        console.log('[DEBUG] Form data received:', { teacherId, className, section, subject, title, dueDate });
+        
+        // Backend Validation
+        if (!teacherId || !className || !subject || !title || !dueDate) {
+            return res.status(400).json({ message: 'Missing mandatory fields: Class, Subject, Title, or Due Date.' });
+        }
+        if (title.length > 30) return res.status(400).json({ message: 'Title exceeds 30 characters.' });
+        if (description && description.length > 75) return res.status(400).json({ message: 'Description exceeds 75 characters.' });
+        if (!description && (!req.files || req.files.length === 0)) {
+            return res.status(400).json({ message: 'Please provide either a description or at least one attachment.' });
+        }
+
+        const fileUrls = req.files ? req.files.map(f => f.path).join(',') : '';
+
+        const query = `
+            INSERT INTO homework (teacher_id, class_name, section, subject, title, description, attachments, due_date)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+        `;
+        const result = await pool.query(query, [
+            teacherId, className, section, subject, title, description, fileUrls, dueDate
+        ]);
+
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error('Create Homework FULL ERROR:', err);
+        res.status(500).json({ 
+            message: 'Error assigning homework.', 
+            error: err.message,
+            detail: err.detail || 'Check server console for details'
+        });
+    }
+});
+
+portalRouter.delete('/homework/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { teacherId } = req.query;
+
+        const result = await pool.query('DELETE FROM homework WHERE id = $1 AND teacher_id = $2 RETURNING *', [id, teacherId]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'Homework not found or unauthorized.' });
+        }
+        res.json({ message: 'Homework deleted successfully.' });
+    } catch (err) {
+        console.error('Delete Homework Error:', err);
+        res.status(500).json({ message: 'Error deleting homework.' });
+    }
+});
+
+// --- Homework Submission System (Student Side) ---
+
+// Student Submits PDF
+portalRouter.post('/homework/submit', upload.single('file'), async (req, res) => {
+    try {
+        const { homeworkId, studentId, studentName } = req.body;
+        if (!req.file) return res.status(400).json({ message: 'No submission file (PDF) provided.' });
+
+        const query = `
+            INSERT INTO homework_submissions (homework_id, "studentId", student_name, submission_url)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (homework_id, "studentId") 
+            DO UPDATE SET submission_url = EXCLUDED.submission_url, submitted_at = CURRENT_TIMESTAMP
+            RETURNING *
+        `;
+        const result = await pool.query(query, [homeworkId, studentId, studentName, req.file.path]);
+        res.json({ message: 'Homework submitted successfully!', submission: result.rows[0] });
+    } catch (err) {
+        console.error('Submission Error:', err);
+        res.status(500).json({ message: 'Error submitting homework.' });
+    }
+});
+
+// Teacher views all submissions for a task
+portalRouter.get('/homework/submissions/:homeworkId', async (req, res) => {
+    try {
+        const { homeworkId } = req.params;
+        const result = await pool.query(
+            'SELECT * FROM homework_submissions WHERE homework_id = $1 ORDER BY submitted_at DESC',
+            [homeworkId]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching submissions.' });
+    }
+});
+
+// Teacher grades a submission
+portalRouter.patch('/homework/grade/:submissionId', async (req, res) => {
+    try {
+        const { submissionId } = req.params;
+        const { grade, feedback } = req.body;
+        
+        const result = await pool.query(
+            'UPDATE homework_submissions SET grade = $1, feedback = $2 WHERE id = $3 RETURNING *',
+            [grade, feedback, submissionId]
+        );
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ message: 'Error saving grade.' });
+    }
+});
+
+// Student grades a submission (existing PATCH grade was above)
+// ...
+
+// Student views their class homework + their submission status
+portalRouter.get('/homework/student-view/:studentId', async (req, res) => {
+    try {
+        const { studentId } = req.params;
+        
+        // 1. Get student's class and section
+        const studentRes = await pool.query('SELECT class, section FROM students WHERE "studentId" = $1', [studentId]);
+        if (studentRes.rows.length === 0) return res.status(404).json({ message: 'Student not found.' });
+        
+        const { class: studentClass, section: studentSection } = studentRes.rows[0];
+        console.log(`[DEBUG] Fetching homework for Student: ${studentId}, Class: "${studentClass}", Section: "${studentSection}"`);
+
+        // 2. Get all homework for this class/section
+        // We match by:
+        // (Table Class == Student Class AND Table Section == Student Section)
+        // OR (Table Class contains Student Class AND Table Class contains Student Section) - for cases where teacher saved combined "10th Std A" as class
+        const homeworkQuery = `
+            SELECT * FROM homework 
+            WHERE (LOWER(class_name) = LOWER($1) AND LOWER(section) = LOWER($2))
+               OR (LOWER(class_name) = LOWER($1 || ' ' || $2) AND section = '')
+               OR (LOWER(class_name) = LOWER($1 || '-' || $2) AND section = '')
+            ORDER BY created_at DESC
+        `;
+        const homeworkRes = await pool.query(homeworkQuery, [studentClass, studentSection]);
+        console.log(`[DEBUG] Found ${homeworkRes.rows.length} assignments.`);
+
+        // 3. Get student's submissions for these assignments
+        const submissionsRes = await pool.query(
+            'SELECT homework_id, grade, submission_url, submitted_at FROM homework_submissions WHERE "studentId" = $1',
+            [studentId]
+        );
+
+        // Merge data
+        const homeworks = homeworkRes.rows.map(hw => {
+            const submission = submissionsRes.rows.find(s => s.homework_id === hw.id);
+            return {
+                ...hw,
+                submission: submission || null
+            };
+        });
+
+        res.json(homeworks);
+    } catch (err) {
+        console.error('Fetch Student View Error:', err);
+        res.status(500).json({ message: 'Error fetching homework assignments.' });
+    }
+});
+
+// --- End Homework Submission System ---
 
 // Save Marks (Upsert)
 portalRouter.post('/marks', async (req, res) => {
